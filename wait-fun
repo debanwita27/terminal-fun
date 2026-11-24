@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""wait-fun: one entry point for terminal-fun: animations to watch, games to play.
+
+Usage: wait-fun [--watch|watch [NAME [args...]]] [--each SECONDS] [--until-done] [--fps N] [--mute]
+       wait-fun --play|play [NAME [args...]]   games one after another; quit one for the next
+                                    (q/Esc in the game), Ctrl-C to stop
+       wait-fun NAME [args...]       run any piece by name, args passed through
+       wait-fun list                 pieces with blurbs and credits
+       wait-fun credits [--markdown]
+       wait-fun install [--no-nudge] [--no-link]   wire the Claude Code hooks into
+                                    ~/.claude/settings.json (+ link wait-fun into ~/.local/bin)
+       wait-fun uninstall            remove them again
+       wait-fun nudge on|off         toggle the "take a break" hint while Claude works
+"""
+import argparse
+import ast
+import os
+import random
+import signal
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+
+KINDS = ("watch", "play")
+FINALE = os.path.join(HERE, "watch", "fireworks.py")
+
+
+def _meta_of(path):
+    """Read a script's module-level META dict without importing or running it."""
+    try:
+        with open(path) as f:
+            tree = ast.parse(f.read(), path)
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "META"):
+                meta = ast.literal_eval(node.value)
+                return meta if isinstance(meta, dict) else None
+    except (OSError, SyntaxError, ValueError) as e:
+        print(f"wait-fun: cannot read META from {path}: {e}", file=sys.stderr)
+    return None
+
+
+def discover():
+    """Return {kind: {name: entry}}; entry = META plus 'script' and 'variants'."""
+    found = {k: {} for k in KINDS}
+    for kind in KINDS:
+        d = os.path.join(HERE, kind)
+        for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(d, fn)
+            meta = _meta_of(path)
+            if meta is None:
+                continue
+            name = meta.get("name") or fn[:-3]
+            entry = dict(meta, name=name, kind=kind, script=path, args=[])
+            found[kind][name] = entry
+            for vname, vargs in (meta.get("variants") or {}).items():
+                found[kind][vname] = dict(entry, name=vname, args=list(vargs), variant=True)
+    return found
+
+
+PIECES = discover()
+ANIMATIONS = PIECES["watch"]
+GAMES = PIECES["play"]
+
+
+def credits_of(entry):
+    """META credit is None (original work), one dict, or a list of dicts."""
+    c = entry.get("credit")
+    return [] if not c else [c] if isinstance(c, dict) else list(c)
+
+
+def credit_tag(entry):
+    cs = credits_of(entry)
+    return f"({cs[0]['type']} {cs[0]['who'].split(' (')[0]})" if cs else ""
+
+
+def print_list():
+    for title, table in (("Watch", ANIMATIONS), ("Play", GAMES)):
+        print(f"{title}:")
+        for name, e in table.items():
+            line = f"  {name:18} {e.get('blurb', '')}"
+            tag = credit_tag(e)
+            print(f"{line} {tag}" if tag else line)
+        print()
+
+
+def print_credits(markdown=False):
+    rows = []
+    for table in (ANIMATIONS, GAMES):
+        for name, e in table.items():
+            if e.get("variant"):
+                continue
+            cs = credits_of(e) or [{"type": "original", "who": "-", "url": "-"}]
+            for c in cs:
+                rows.append((name, c.get("type", "-"), c.get("who", "-"), c.get("url", "-")))
+    if markdown:
+        print("| Piece | Credit | Who | Link |\n|---|---|---|---|")
+        for name, t, who, url in rows:
+            print(f"| {name} | {t} | {who} | {url} |")
+    else:
+        for name, t, who, url in rows:
+            print(f"{name}: {t}" + (f" {who}" if who != "-" else ""))
+            if url != "-":
+                print(f"    {url}")
+
+
+def status_path():
+    return os.path.expanduser(
+        os.environ.get("CLAUDE_FUN_STATUS", "~/.cache/claude-fun/status.json"))
+
+
+FINALE_QUIT = 3  # fireworks --hold exit code for q
+
+
+def done_session(since):
+    """The earliest 'done' record newer than `since`, from any session, or None.
+
+    Each session has its own file under sessions/ so a busy one can't overwrite another's
+    done; the shared status file is read too, for hand-written test records."""
+    import json
+    paths = [status_path()]
+    sdir = os.path.join(os.path.dirname(status_path()), "sessions")
+    try:
+        paths += [os.path.join(sdir, fn) for fn in os.listdir(sdir) if fn.endswith(".json")]
+    except OSError:
+        pass
+    found = []
+    for path in paths:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if (isinstance(data, dict) and data.get("state") == "done"
+                and isinstance(data.get("ts"), (int, float)) and data["ts"] > since):
+            found.append(data)
+    return min(found, key=lambda d: d["ts"]) if found else None
+
+
+def finale_text(rec):
+    cwd = rec.get("cwd")
+    name = os.path.basename(cwd.rstrip("/")) if isinstance(cwd, str) and cwd.strip("/") else None
+    banner = f"✓ Claude is done in {name}" if name else "✓ Claude is done"
+    prompt = rec.get("prompt")
+    return banner, (f"“{prompt}”" if isinstance(prompt, str) and prompt else None)
+
+
+def spawn(name, extra, fps, frames, mute=False):
+    script = (ANIMATIONS.get(name) or GAMES[name])["script"]
+    cmd = [sys.executable, script, *extra, *(["--mute"] if mute else [])]
+    if fps is not None:
+        cmd += ["--fps", str(fps)]
+    if frames:
+        cmd += ["--frames", str(frames)]
+    return subprocess.Popen(cmd)
+
+
+def stop(proc):
+    """Ask the child to exit via SIGINT so it restores the terminal."""
+    if proc.poll() is not None:
+        return
+    for sig, wait in ((signal.SIGINT, 2), (signal.SIGTERM, 2), (signal.SIGKILL, 5)):
+        try:
+            proc.send_signal(sig)
+            proc.wait(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+        except ProcessLookupError:
+            return
+
+
+def run_game(name, fps, mute=False):
+    """Run a game until it exits and return its exit code; it shows its own
+    "Claude's done!" banner."""
+    proc = spawn(name, GAMES[name]["args"], fps, 0, mute)
+    try:
+        return proc.wait()
+    except BaseException:
+        stop(proc)
+        raise
+
+
+def run_games(fps, mute=False):
+    """Random games back to back. A game quit normally (exit 0) moves on to the next;
+    Ctrl-C, or a game failing, ends the loop."""
+    last = None
+    while True:
+        pool = [n for n in GAMES if n != last] or list(GAMES)
+        last = random.choice(pool)
+        code = run_game(last, fps, mute)
+        if code != 0:
+            return 130 if code in (130, -signal.SIGINT) else code
+
+
+def run_one(name, each, fps, until_done, since, mute=False):
+    """Run an animation for `each` seconds. Returns the done record that ended it, or None."""
+    # Without --fps each piece runs at its own default, so the deadline ends it.
+    proc = spawn(name, ANIMATIONS[name]["args"], fps, int(each * fps) if fps else 0, mute)
+    deadline = time.monotonic() + each + (3 if fps else 0)
+    try:
+        while proc.poll() is None:
+            rec = until_done and done_session(since)
+            if rec:
+                stop(proc)
+                return rec
+            if time.monotonic() > deadline:
+                stop(proc)
+                break
+            time.sleep(0.25)
+    except BaseException:
+        stop(proc)
+        raise
+    return done_session(since) if until_done else None
+
+
+def run_passthrough(entry, args):
+    """Run one piece with the caller's args verbatim and return its exit code."""
+    proc = subprocess.Popen([sys.executable, entry["script"], *entry["args"], *args])
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        stop(proc)
+        return 130
+    except BaseException:
+        stop(proc)
+        raise
+
+
+def lookup(name):
+    return ANIMATIONS.get(name) or GAMES.get(name)
+
+
+def dispatch(argv):
+    """Handle the positional commands; returns an exit code, or None to fall through to options."""
+    if argv and argv[0] in ("--watch", "--play"):
+        argv[0] = argv[0][2:]
+    if not argv or argv[0].startswith("-"):
+        return None
+    cmd, rest = argv[0], argv[1:]
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    if cmd == "list":
+        print_list()
+        return 0
+    if cmd == "credits":
+        print_credits(markdown="--markdown" in rest)
+        return 0
+    if cmd in ("install", "uninstall", "nudge"):
+        from fun import install
+        return install.main(cmd, rest)
+    if cmd in KINDS:
+        table = ANIMATIONS if cmd == "watch" else GAMES
+        if rest and not rest[0].startswith("-"):
+            if rest[0] not in table:
+                print(f"wait-fun: no {cmd} piece named {rest[0]!r}; try 'wait-fun list'", file=sys.stderr)
+                return 2
+            return run_passthrough(table[rest[0]], rest[1:])
+        if cmd == "play":
+            if not GAMES:
+                print("wait-fun: no games found in play/", file=sys.stderr)
+                return 2
+            argv[:] = ["--games", *rest]
+        else:
+            argv[:] = rest
+        return None
+    entry = lookup(cmd)
+    if entry is None:
+        print(f"wait-fun: unknown command or piece {cmd!r}; try 'wait-fun list'", file=sys.stderr)
+        return 2
+    return run_passthrough(entry, rest)
+
+
+def main():
+    argv = sys.argv[1:]
+    code = dispatch(argv)
+    if code is not None:
+        return code
+
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0], usage=argparse.SUPPRESS,
+                                epilog=__doc__.split("\n", 2)[2])
+    p.formatter_class = argparse.RawDescriptionHelpFormatter
+    p.add_argument("--each", type=float, default=90, help="seconds per animation (default 90)")
+    p.add_argument("--until-done", action="store_true",
+                   help="cycle until any Claude session finishes, then pause on a fireworks finale "
+                        "naming it; any key resumes, q quits")
+    p.add_argument("--fps", type=int, default=None,
+                   help="frames per second (default: each piece's own, 12 or 20)")
+    p.add_argument("--mute", action="store_true", help="no sound (CLAUDE_FUN_SOUND=0 mutes everything)")
+    p.add_argument("--only", metavar="NAME", help=argparse.SUPPRESS)
+    p.add_argument("--games", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--list", action="store_true", help=argparse.SUPPRESS)
+    args = p.parse_args(argv)
+
+    if args.list:
+        print_list()
+        return 0
+    if args.only and not lookup(args.only):
+        p.error(f"unknown animation or game {args.only!r}; try 'wait-fun list'")
+    if args.games and args.only and args.only not in GAMES:
+        p.error(f"{args.only!r} is not a game; try 'wait-fun list'")
+    if args.each <= 0:
+        p.error("--each must be positive")
+
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # unwinds to stop(child)
+    since = time.time()
+    names = list(ANIMATIONS)
+    last = None
+    try:
+        if args.only in GAMES:
+            run_game(args.only, args.fps, args.mute)
+            return 0
+        if args.games:
+            return run_games(args.fps, args.mute)
+        while True:
+            if args.only:
+                name = args.only
+            else:
+                name = random.choice([n for n in names if n != last])
+            last = name
+            rec = run_one(name, args.each, args.fps, args.until_done, since, args.mute)
+            if rec:
+                banner, note = finale_text(rec)
+                proc = subprocess.Popen([sys.executable, FINALE, "--finale", "--hold", "--banner", banner,
+                                         *(["--note", note] if note else []),
+                                         *(["--mute"] if args.mute else [])])
+                try:
+                    code = proc.wait()
+                except BaseException:
+                    stop(proc)
+                    raise
+                # Without a tty the finale can't hold, so there is nothing to resume into.
+                if code == FINALE_QUIT or not sys.stdin.isatty():
+                    return 0
+                since = rec["ts"]  # sessions that finished during the pause still count
+                continue
+            if not args.until_done and args.only:
+                return 0
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

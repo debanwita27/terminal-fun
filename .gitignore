@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# local asset clones and renders (third-party assets are never committed; see CREDITS.md)
+bullet_hell/
+*.wav
+*.m4a
+*.mp3
+*.ogg
+*.flac
+*.aiff
+
+# private working notes
+MORNING.md
+PROGRESS.md
+POLISH.md

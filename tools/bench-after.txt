@@ -1,0 +1,32 @@
+# after: diff rendering, sync output, focus pause, 12 fps calm pieces, forest/braille fixes
+# 2026-11-10 02:36  120x40, 200 frames, default fps, python 3.14.8
+piece        kind   cpu ms/frame  KB/frame  cpu %  wall s exit  extra args
+swirl        watch          4.98     11.76    5.9    16.8    0  200 --seed 1
+moire        watch          3.95     38.81    4.7    16.8    0  200 --seed 1
+forest       watch          3.48      5.43    4.2    16.8    0  200 --seed 1
+blackhole    watch          3.16      3.41    6.3    10.1    0  200 --seed 1
+reef         watch          3.10      1.35    3.7    16.8    0  200
+ducklings    play           2.64      0.50    5.2    10.1    0  200 --demo --seed 1
+koi          watch          2.59      2.49    3.1    16.8    0  200 --seed 1
+skyline      watch          2.59      0.22    3.1    16.7    0  200
+jellyfish    watch          2.36      3.21    4.7    10.1    0  200 --seed 1
+bugsquash    play           2.22      0.13    4.4    10.1    0  200 --start --seed 1
+froghop      play           1.99      1.02    3.9    10.1    0  200 --demo --seed 1
+sandpile     watch          1.95      0.23    2.3    16.8    0  200 --seed 1
+codefire     watch          1.89      6.39    2.3    16.7    0  200 --seed 1
+spacecol     watch          1.86      0.63    2.2    16.8    0  200 --seed 1
+sharks       watch          1.82      3.27    2.2    16.7    0  200 --seed 1
+forage       play           1.52      0.06    3.0    10.1    0  200 --seed 1
+campfire     watch          1.45      2.23    1.7    16.7    0  200
+dyna         watch          1.32      0.41    1.6    16.7    0  200 --seed 1
+tixy         watch          1.06      2.35    1.3    16.8    0  200 --seed 1
+hourglass    watch          0.89      0.26    1.1    16.8    0  200
+meltdown     watch          0.76      0.28    0.9    16.8    0  200 --seed 1
+biplane      watch          0.76      0.43    1.5    10.1    0  200
+bonkyon      play           0.75      0.03    1.5    10.1    0  200 --seed 1
+catstack     play           0.72      0.13    1.4    10.1    0  200 --start --seed 1
+excuses      watch          0.71      0.19    1.4    10.1    0  200
+fireworks    watch          0.66      0.43    1.3    10.1    0  200
+catnap       watch          0.59      0.13    0.7    16.7    0  200
+TOTAL                      51.75     85.77   75.5   379.1
+cpu % = child user+sys over wall time, including start-up; wall is noisy on a busy machine

@@ -1,0 +1,24 @@
+# ORIGINAL code (pre-optimisation snapshot), run concurrently with bench-after.txt
+# 2026-11-08 19:27  120x40, 200 frames, default fps, python 3.14.8
+piece        kind   cpu ms/frame  KB/frame  cpu %  wall s exit  extra args
+forest       watch          9.40     26.51    4.5    42.0    0  200 --seed 1
+reef         watch          3.75      9.25    2.9    25.6    0  200
+jellyfish    watch          3.52     24.91    2.5    28.0    0  200 --seed 1
+skyline      watch          3.50     22.26    5.4    12.9    0  200
+ducklings    play           3.33      9.44    3.5    18.8    0  200 --demo --seed 1
+bugsquash    play           2.90     11.21    4.4    13.2    0  200 --start --seed 1
+spacecol     watch          2.71      7.02    3.8    14.2    0  200 --seed 1
+froghop      play           2.64      9.90    3.7    14.4    0  200 --demo --seed 1
+sandpile     watch          2.49      6.32    2.1    23.6    0  200 --seed 1
+blackhole    watch          2.42     11.86    4.4    11.0    0  200 --seed 1
+forage       play           2.27     16.74    2.5    17.9    0  200 --seed 1
+campfire     watch          1.55      9.54    3.0    10.4    0  200
+hourglass    watch          1.53      6.55    2.4    12.7    0  200
+bonkyon      play           1.28      6.07    2.2    11.8    0  200 --seed 1
+fireworks    watch          1.27      6.56    2.1    11.8    0  200
+catstack     play           1.23      5.96    2.2    11.2    0  200 --start --seed 1
+excuses      watch          1.22      6.21    2.0    12.4    0  200
+biplane      watch          1.13      5.68    2.2    10.4    0  200
+catnap       watch          1.02      5.16    2.0    10.4    0  200
+TOTAL                      49.18    207.15   57.8   312.8
+cpu % = child user+sys over wall time, including start-up; wall is noisy on a busy machine

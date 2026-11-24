@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Claude Code hook: record working/done/idle state for terminal-fun animations.
+
+Reads the hook JSON from stdin and atomically writes the status file
+($CLAUDE_FUN_STATUS or ~/.cache/claude-fun/status.json) plus one file per session in
+sessions/ next to it, so a busy session can't overwrite another's "done". Never fails Claude.
+"""
+import json
+import os
+import sys
+import tempfile
+import time
+
+PROMPT_CHARS = 80
+STALE_SECS = 2 * 86400  # session files older than this are pruned on Stop
+
+STATES = {
+    "UserPromptSubmit": "working",
+    "PreToolUse": "working",
+    "PostToolUse": "working",
+    "Stop": "done",
+    "Notification": "idle",
+}
+
+
+def main():
+    payload = json.loads(sys.stdin.read() or "{}")
+    if not isinstance(payload, dict):
+        raise ValueError("payload is not a JSON object")
+    event = payload.get("hook_event_name")
+    state = STATES.get(event)
+    if state is None:
+        return
+    tool = payload.get("tool_name") if event in ("PreToolUse", "PostToolUse") else None
+    path = os.path.expanduser(
+        os.environ.get("CLAUDE_FUN_STATUS", "~/.cache/claude-fun/status.json"))
+    record = {"state": state, "tool": tool, "event": event, "ts": time.time(),
+              "session": payload.get("session_id"), "cwd": payload.get("cwd")}
+    sid = record["session"]
+    sdir = os.path.join(os.path.dirname(path) or ".", "sessions")
+    spath = os.path.join(sdir, f"{sid}.json") if isinstance(sid, str) and sid.isprintable() \
+        and "/" not in sid and sid not in ("", ".", "..") else None
+    prompt = payload.get("prompt") if event == "UserPromptSubmit" else None
+    if prompt is None and spath:
+        try:
+            with open(spath) as f:
+                prompt = json.load(f).get("prompt")
+        except (OSError, ValueError, AttributeError):
+            prompt = None
+    if isinstance(prompt, str):
+        record["prompt"] = " ".join(prompt.split())[:PROMPT_CHARS]
+    write(path, record)
+    if spath:
+        write(spath, record)
+        if state == "done":
+            prune(sdir)
+
+
+def write(path, record):
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".status-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def prune(sdir):
+    cutoff = time.time() - STALE_SECS
+    for fn in os.listdir(sdir):
+        p = os.path.join(sdir, fn)
+        try:
+            if fn.endswith(".json") and os.path.getmtime(p) < cutoff:
+                os.unlink(p)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"claude-fun-status: {e}", file=sys.stderr)
+    sys.exit(0)

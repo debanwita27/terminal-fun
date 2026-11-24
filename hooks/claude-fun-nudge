@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Claude Code hook: once a prompt has kept Claude busy for a while, suggest a terminal-fun break.
+
+UserPromptSubmit records when the prompt started; PreToolUse shows one line to the user
+(the hook's `systemMessage`, which Claude never sees) when the prompt has run longer than
+CLAUDE_FUN_NUDGE_AFTER seconds (default 45). At most one nudge per prompt and one per
+CLAUDE_FUN_NUDGE_EVERY seconds across all sessions (default 900). Silent when
+CLAUDE_FUN_NUDGE=0, when ~/.cache/claude-fun/nudge-off exists, or when wait-fun is already
+running. Never fails Claude.
+"""
+import json
+import os
+import random
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+CACHE = os.path.expanduser("~/.cache/claude-fun")
+STATE = os.path.join(CACHE, "nudge.json")
+OFF = os.path.join(CACHE, "nudge-off")
+STALE_SECS = 86400
+
+
+def env_secs(name, default):
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except ValueError:
+        return float(default)
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save(s):
+    os.makedirs(CACHE, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=CACHE, prefix=".nudge-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(s, f)
+        os.replace(tmp, STATE)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def launcher():
+    """The command to print: bare `wait-fun` if it's on PATH, else the full path."""
+    found = shutil.which("wait-fun")
+    if found and os.path.realpath(found) == os.path.join(HERE, "wait-fun"):
+        return "wait-fun"
+    return os.path.join(HERE, "wait-fun")
+
+
+def pieces(kind):
+    try:
+        return sorted(f[:-3] for f in os.listdir(os.path.join(HERE, kind))
+                      if f.endswith(".py") and not f.startswith("_"))
+    except OSError:
+        return []
+
+
+def already_playing():
+    # Match the launcher (also via a PATH symlink) and running pieces, not this hook,
+    # which also lives under HERE.
+    pattern = f"(/wait-fun|/wf|{HERE}/(watch|play)/[^ ]+\\.py)( |$)"
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(p.strip() != str(os.getpid()) for p in r.stdout.split())
+
+
+def message():
+    wf = launcher()
+    games, watch = pieces("play"), pieces("watch")
+    options = [f"{wf} --until-done   (fireworks the moment Claude finishes)"]
+    if games:
+        options.append(f"{wf} play {random.choice(games)}")
+    if watch:
+        options.append(f"{wf} watch {random.choice(watch)}")
+    return ("⏳ Claude is still working. Take a break in another tab: " + random.choice(options)
+            + "   ·   silence: wait-fun nudge off")
+
+
+def main():
+    if os.environ.get("CLAUDE_FUN_NUDGE") == "0" or os.path.exists(OFF):
+        return
+    payload = json.loads(sys.stdin.read() or "{}")
+    if not isinstance(payload, dict):
+        raise ValueError("payload is not a JSON object")
+    event, sid = payload.get("hook_event_name"), payload.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return
+    now = time.time()
+    s = load()
+    sessions = s.get("sessions") if isinstance(s.get("sessions"), dict) else {}
+    if event == "UserPromptSubmit":
+        sessions = {k: v for k, v in sessions.items()
+                    if isinstance(v, dict) and now - v.get("start", 0) < STALE_SECS}
+        sessions[sid] = {"start": now, "nudged": False}
+        s["sessions"] = sessions
+        save(s)
+        return
+    if event != "PreToolUse":
+        return
+    cur = sessions.get(sid)
+    if not isinstance(cur, dict) or cur.get("nudged"):
+        return
+    if now - cur.get("start", now) < env_secs("CLAUDE_FUN_NUDGE_AFTER", 45):
+        return
+    cur["nudged"] = True  # one decision per prompt, whether or not a line is shown
+    s["sessions"] = sessions
+    show = (now - s.get("last", 0) >= env_secs("CLAUDE_FUN_NUDGE_EVERY", 900)
+            and not already_playing())
+    if show:
+        s["last"] = now
+    save(s)
+    if show:
+        print(json.dumps({"systemMessage": message()}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"claude-fun-nudge: {e}", file=sys.stderr)
+    sys.exit(0)
